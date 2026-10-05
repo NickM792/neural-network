@@ -1,0 +1,319 @@
+Step 1) Tokenization (breaking down words into tokens)
+
+"string" -> tokens (like "dog, cat, un, beliv, able")
+
+
+Step 2) Embedding (looking up tokens on the embedding table and matching their ids with their values (like [0.2, 0.5, 0.9]))
+
+tokens -> interger ids (done via the embedding lookup table, which has rows equivelant to the number of tokens/ids in the vocabulary, and columns equal to the
+number of dimensions where each dimension is an arbitrary value identifying several quantity like similarity to a lawn mower, or how much of an adjective
+that word is). Lookup table is matrix E_token with size k (number of ids) x d (number of dimensions)
+
+
+Step 3) RMS Norm calculation (normalize the data prevent rapid growth or shrinking. This step occurs before every self attention, before every FFN layer, and
+once immediatley at the end after all L blocks (rms norm -> self attention -> rms norm -> FFN) have completed.)
+
+Create input matrix X = N x d where N is the number of tokens in the initial  input, and d is the vector dimension.
+
+For each row, square the elements in the row, then divided by the number of columns. Then add the numeric stability constant eps=10^-5 and take the square root
+of the result. (X_rms(i) is the resultant row i, and X(i) is the initial row i) Divide each row by the scalar rms value and multiply element-wise via the
+hadamard product by the gain parameter gamma.
+
+for each row i: ms_i = (1/d) * ((X_(i,0))^2 + (X_(i,1))^2 + ... + (X_(i,d-1))^2)
+
+                rms_i = sqrt(ms_i + eps)
+
+                X_norm(i) = (X_(i) / rms_i) ⊙ gamma_(i)
+
+
+Step 4) Self attention (comparing tokens against each other to determine how related they are)
+
+create input matrix X = N x d where N is the number of tokens in the initial  input, and d is the vector dimension. This means that each row in X is the token's
+vector (x_v = x_token + x_pos) where x_v is the positionaly encoded vector comprised of the original token vector plus the position vector which represents the
+position of the token in the input. x_pos is the corresponding row in
+
+E_pos = [sin(omega_i*j) cos(omega_i*j) sin(omega_(i+1)*j) cos(omega_(i+1)*j) ...],
+        [sin(omega_i*(j+1)) cos(omega_i*(j+1)) sin(omega_(i+1)*(j+1)) cos(omega_(i+1)*(j+1)) ...], ...
+
+where i = 0,1,2,...,d/2-1 (d = number of dimensions) and j = 0,1,2,...,M (M = number of tokens), so x_pos for the second token is the second row of E_pos.
+omega_i = 1 / (10000^(2i/d))
+
+Next, calculate the weight matricies for query, value, and key to be adjusted in the backward pass:
+W_Q shape: d x d
+W_K shape: d x d
+W_V shape: d x d
+
+Q = X x W_Q               (size N x d)
+K = X x W_K               (size N x d)
+V = X x W_V               (size N x d)
+
+Now compute the raw similarity score (S_raw) by comparing the query (information the token wants) compared to the key (information it contains)
+S_raw = Q x K^T           (size N x N)
+
+Find the attention weights matrix (A) using the softmax function, which uses an exponentiall e to make all results positive, make higher scores more noticable
+than lower ones, and normalize the results to 1.0 by taking the Z-score as an input:
+Z = S_raw / sqrt(d)
+A = softmax(Z)
+
+(ex: token 2 compared to 1,2, and 3 via Q x K^T, then z_1, z_2, z_3 found to make the row Z_2 = [z_1,z_2,z_3], then for each i in Z_2, find e^i,
+find sum of all e^i values, then find each probabilty P(z_1) = e^(i_1) / sum, ... so row A_2 = [P(z_1), P(z_2), P(z_3)])
+
+Now find new comparative token weights by multiplying discovered attention weights (A) by current value (V):
+H_in = AV
+
+The final output matrix for the attention phase (X_attn_out) is the comparitive token weights (H_in) times the weight matrix for this layer (W_O):
+
+X_attn_out = H_in * W_O
+
+
+
+Step 5) Expanding (multiplying the input vector for a token from the self attention stage by the weight values of that layer, expanding the number of data fields
+(ex: 3 x 1 before, 12 x 1 after))
+
+expanded vector = weight of the current layer * self-attention result + bias vector (applying linear transformation by the weight vector to scale the likelihood
+of each quantity by that layer's weights, then adding an offset to allow the data to scale without having to pass the origin)
+
+X_exp = X_attn_out x W_1 + b_1
+
+where X_exp is the expanded vector, H is the matrix of token weights after self attention is applied (each row is a token vector), W is this layer's weights,
+and B ias the bias vector offset.
+
+
+Step 6) Activation Function (cutoff the linear data below zero to form curves when put together with other data)
+
+X_act = sigma(X_exp) = max(0, z)
+
+where z is every element (like X_exp (row 2, col 3)) in X_exp, meaning every element in X_exp is evalueated by max(0,z), where if z > 0, the output is z,
+but if z <= 0, the output is 0. This allows us to represent multiple quantities (more than there are in the input matrix H) stored in transformations by
+saying W_1 x W_2 = W_Combined. Note: max(0,z) is known as ReLu(z).
+
+
+Step 7) Compression (multiplying the result of the activation function by the second weight of this layer to recompress data back to a smaller size via
+superposition)
+
+H_comp = X_act x W_2 + b_2
+
+where H_comp is the resultant compressed matrix, W_2 is the second weight matrix of the layer, and b_2 is the second bias vector of the layer.
+
+
+Step 8) Softmax prediction (after all of the (L) layers have applied their weights, take the output matrix (X_final) and calculate the e-score for each value in
+the vector, then divide each field's e-score by the sum of all the e-scores to get the probability of each word being relevant)
+
+Z_final = X_final x W_vocab = X_final x E_token^T
+
+where Z_final is the matrix of z-scores given by multiplying the transformer laryers output matrix X_final by the W_vocab matrix, where W_vocab = E_token^T
+since a row k from E_token should be compared to each token in X_final (done by transposing E_token). Setting E_token^T = W_vocab is called weight tying.
+A bias vector is not needed here since the normalization to 1.0 will handle reducing uncertainty bias.
+
+P(words) = Softmax(Z_final)      (applied row-wise)
+
+where P(words) is the probability matrix of size (N x V) where N is the number of tokens and V is the vocabulary size (ex: 50,000 pre-defined tokens).
+P(words) contains rows that represent the probability each word in the vocabulary should appear (sum of all probabilities in the row = 1.0). Each entry
+(P_i,j) represents the conditional probability a token aligns with a vocabulary word given context (P(token_i = word_j | context)).
+
+
+Step 9) Predicted Loss (calculate by taking the negative natural log of the probability of the correct class)
+
+Now calculate the predicted loss (L_pred) by taking the mean negative natrual log of each word, since if the probability a word aligns is high (close to 1.0),
+then the loss for that word will be close to 0.0.
+
+Let y = [y_1,y_2,...,y_N]
+
+where y_i is the target/correct word the model should predict for token i. Use P[i, y_i] to get the probability of the correct word appearing for each token,
+then take each's natural log and sum them, and multiply be -1/N to find the predicted loss.
+
+L_pred = -1/N * (the sum of all  ln(P_i,y_i))
+
+
+Step 10) Total Loss (find the total loss by adding the weight penalty to the predicted loss)
+
+L_total = L_pred + L_reg = L_pred + ((lambda / 2) * ||W||^2_F)
+
+where L_pred is how well the model predicted the correct tokens across the batch, L_reg is the weight penalty which limits how fast the model can overfit (making
+the weights large positive or negative numbers) and keeps the changes to each run smaller, lambda is the weight decay coefficient (usually a small value like
+0.001) which limits the change in weights across each run to prevent overfitting. L_total is the total scalar loss experienced by the model, and it marks the
+end of the forward pass. 
+
+||W||^2_F is called the squared Frobenius Norm (of matrix W). To find the square Frobenius Norm of 2x2 matrix W_1 for example (||W_1||^2_F), find the sum of all
+elements (W_1(i,j)) in the matrix:
+
+||W_1||^2_F = (W_1,1)^2 + (W_2,1)^2 + (W_1,2)^2 + (W_2,2)^2
+
+In this case, ||W||^2_F is the sum of squared Frobenius Norms for every weight matrix used in the model (W_Q, W_K, W_V, W_O, W_1, W_2, ...) including E_token
+(using transpose of E_token doesn't matter here since it just swaps position of elements without changing them).
+
+||W||^2_F = ||W_Q||^2_F + ||W_K||^2_F + ||W_V||^2_F + ... + ||E_token||^2_F
+
+
+Step 11) Error Gradient (each item in the vector is the class' probability minus 1 if assigned correctly (0 if wrong))
+
+G_error = ∂L_pred / ∂Z_final = P(words) - Y
+
+where G_error is the error gradient found by determining the change in predicted loss with respect to the change in Z_final, and Y is the ground-truth matrix
+(size N x V) that contains information about the correct or incorrect tokens based on Y. Each row (N) is a token that has (V) columns of possible answers,
+so the correct answer for a token of row i will be in column j, and the correct answer is initialized to 1, while other incorrect answers are initialized to 0.
+This means that subtracting Y from P(words) yields a negative value if the correct word was chosen and a positive one if not, decreasing the logit Z_(i,j) if
+the value (and therefore the gradient) is positive, while negative values increase weights. The closer a value G_error(i,j) is to 1 (more correct), the smaller
+change in weights will be since the difference will be closer to zero. (Y is also reffered to as the one-hot encoded target matrix).
+
+
+Step 12) Vocab Weight Gradient (multiply the error gradient by the transpose of the last output vector)
+
+G_W_Vocab = ∂L_total / ∂W_vocab = G_error^T x X_final
+
+where G_W_Vocab is the weight gradient for the final output layer found by applying the error gradient to the final vector outputs for each token.
+
+
+Step 13) Backtracking (find the error gradient of the last layer by multiplying the transpose of the current layer's weights by the current error, then find
+the weight gradient for that previous layer by multiplying the error for that previous layer by the transpose of the vector entering that previous layer times
+the activation function's derivative)
+
+The order in which operations are preformed in this step is as follows:
+ - Back propagate through the unembedding layer
+
+   G_norm_final = G_error x W_vocab = G_error x E_token^T
+
+
+ - Back propagate through the final rms layer and compute gamma error gradient (G_gamma_final):
+
+   ms_i = (1/d) * ((X_out_last(i,0))^2 + (X_out_last(i,1))^2 + ... + (X_out_last(i,d-1))^2)
+   rms_i = sqrt(ms_i + eps)
+   X_normal_i = X_i / rms_i
+   gs_(i) = G_norm_final(i) ⊙ X_normal(i)
+   G_gamma_final(j) = gs_(i,0) + gs_(i,1) + ... + gs(i,j)
+
+   D = G_norm_final ⊙ gamma
+   D_N = D ⊙ X_normal
+   p_i = (D_N(i,0) + D_N(i,1) + ... + D_n(i,d)) / d
+   M_i = D_i - p_i * X_normal_i
+   G_out_last = M / rms
+
+
+ - Loop for each block (L) given an incoming gradient G_out (start loop){
+   - Split the gradient into two sub-processes where FFN and residual connection meet. In the last block of the network, G_out = G_out_last:
+     
+     G_res_1 = G_out
+     G_ffn = G_out
+
+     
+   - Compute the compression weight (W_2) and back propagate through this layer:
+
+     G_W_2 = X_act^T x G_ffn
+     G_post-act = G_ffn x W_2^T
+
+     
+   - Back propagate through activation derivative (take the hadamard product of the post activation gradient (G_post-act) with the derivative of
+     the activation function yielding the pre-activation gradient (G_pre-act)). (Note the hadamard product is denoted by symbol ⊙):
+
+     G_pre-act = G_post-act ⊙ sigma'(X_exp)
+
+     where the derivative of the ReLu activation function is as follows: {1 if z > 0, 0 if z <= 0}.
+
+     
+   - Compute the expansion weight gradient (W_1) and back propagate through this layer:
+
+     G_W_1 = X_norm_2^T x G_pre-act
+     G_ffn_in = G_pre-act x W_1^T
+
+     
+   - Back propegate through the second rms layer of this block and compute the gamma error gradient (G_gamma_2):
+
+     ms_i = (1/d) * ((X_attn_out(i,0))^2 + (X_attn_out(i,1))^2 + ... + (X_attn_out(i,d-1))^2)
+     rms_i = sqrt(ms_i + eps)
+     X_normal_i = X_i / rms_i
+     gs_(i) = G_ffn_in(i) ⊙ X_normal(i)
+     G_gamma_2(j) = gs_(i,0) + gs_(i,1) + ... + gs(i,j)
+
+     D = G_ffn-in ⊙ gamma
+     D_N = D ⊙ X_normal
+     p_i = (D_N(i,0) + D_N(i,1) + ... + D_n(i,d)) / d
+     M_i = D_i - p_i * X_normal_i
+     G_norm_2 = M / rms
+
+     
+   - Recombine ffn residual addition:
+
+     G_mid = G_res_1 + G_norm_2
+
+     
+   - Split gradient at attention residual connection:
+
+     G_res2 = G_mid
+     G_attn = G_mid
+
+     
+   - Compute attention output weight gradient (G_W_O) and back propagate through the attention output layer:
+
+     G_W_O = H_in^T x G_attn
+     G_H_in = G_attn x W_O^T
+
+     
+   - Back propagate through self attention multiplication and softmax derivative (H_in = AV). rs is of size (N x 1):
+
+     G_V = A^T x G_H_in
+     G_A = G_H_in x V^T
+     R = G_A ⊙ A
+     rs_i = R_(i,0) + R_(i,1) + ... + R_(i,j)
+     G_S = A ⊙ (G_A - rs)
+     G_Q = (G_S x K) / sqrt(d)
+     G_K = (G_S^T x Q) / sqrt(d)
+
+     
+   - Find gradients for key, value, and query, then back propagate through projections weights:
+
+     G_W_Q = X_norm_1^T x G_Q
+     G_W_K = X_norm_1^T x G_K
+     G_W_V = X_norm_1^T x G_V
+     G_attn_in = (G_Q x W_Q^T) + (G_K x W_K^T) + (G_V x W_V^T)
+
+     
+   - Back propagate through the first rms norm and compute the gamma error gradient. (X is size Nxd, and X_normal_i and X_i are for row i, not all rows. p is
+     the matrix of means across columns of size (N x 1). eps is the numeric stability constant eps=10^-5. G_gamma_1 is size 1 x d). rms is a N x 1 vector.
+     G_gamma(j) sums down rows of N tokens):
+
+    ms_i = (1/d) * ((X_(i,0))^2 + (X_(i,1))^2 + ... + (X_(i,d-1))^2)
+    rms_i = sqrt(ms_i + eps)
+    X_normal_i = X_i / rms_i
+    gs_(i) = G_attn_in(i) ⊙ X_normal(i)
+    G_gamma_1(j) = gs_(i,0) + gs_(i,1) + ... + gs(i,j)
+
+    D = G_attn-in ⊙ gamma
+    D_N = D ⊙ X_normal
+    p_i = (D_N(i,0) + D_N(i,1) + ... + D_n(i,d)) / d
+    M_i = D_i - p_i * X_normal_i
+    G_norm_1 = M / rms
+
+    
+   - Recombined attentino at residual addition:
+
+     G_block-in = G_res_2 + G_norm_1
+
+     
+ } (end loop)
+
+ 
+ - Find the input embedding matrix gradient (G_E_token):
+
+   G_E_token = (Y^T x G_block_in) + G_W_vocab^T
+
+ - Stop (end of network).
+
+
+Step 14) Update Weights (after backtracking through all layers and storing gradient vectors for each weight, replace old weights with the old weights minus
+learning rate times gradient vectors, once all are updated, clear the stored gradient vectors)
+
+For a weight matrix theta_old (which applies to W_Q, W_K, W_V, W_1, W_2, E_token, and gamma for all layers), the new weight matrix theta_new is found by
+subtracting the learning rate (eta) scalar times the computed error gradient for that layer (G_theta).
+
+theta_new = theta_old - eta * G_theta
+
+
+
+
+For defining tokens initially, use a dictonary/hash map (ex: "yellow" = 3) where "yellow" is the token and 3 is the token id. For biases, the values in the
+bias vector can all be initialized to zero in matrix size (1 x d), and the values for gamma matricies can be initialized to 1 (for size 1 x d). To initialize
+the embedding table (size V x d), use a normal distribution (with mean (u) = 0, and standard deviation (omega) = 1/sqrt(d)). For most linear weights like W_O,
+size d x d, use the Xavier/Glorot normal distribution (std dev (omega=sqrt1/d)). For the ffn expansion weight W_1, use a He/Kaiming normal distribution
+(std dev (omega = sqrt(2/d))), where the 2 is used since the ReLu function cuts the signal variance in half (values get replaced by zero if negative). For W_2,
+the compression must be accounted for in the normal distribution by omega = sqrt(1/(d+d_ffn)) where d_ffn = 4d. W_1 is size (d x d_ffn), W_2 is (d_fnn x d),
+other linear weights are (d x d).
